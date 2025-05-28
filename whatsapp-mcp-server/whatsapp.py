@@ -7,7 +7,11 @@ import requests
 import json
 import audio
 
+
+WHATSAPP_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
+
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
+
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 
 @dataclass
@@ -49,41 +53,20 @@ class MessageContext:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(WHATSAPP_DB_PATH)
         cursor = conn.cursor()
-        
-        # First try matching by exact JID
-        cursor.execute("""
-            SELECT name
-            FROM chats
-            WHERE jid = ?
+        cursor.execute('''
+            SELECT full_name, first_name, push_name, business_name
+            FROM whatsmeow_contacts
+            WHERE their_jid = ?
             LIMIT 1
-        """, (sender_jid,))
-        
+        ''', (sender_jid,))
         result = cursor.fetchone()
-        
-        # If no result, try looking for the number within JIDs
-        if not result:
-            # Extract the phone number part if it's a JID
-            if '@' in sender_jid:
-                phone_part = sender_jid.split('@')[0]
-            else:
-                phone_part = sender_jid
-                
-            cursor.execute("""
-                SELECT name
-                FROM chats
-                WHERE jid LIKE ?
-                LIMIT 1
-            """, (f"%{phone_part}%",))
-            
-            result = cursor.fetchone()
-        
-        if result and result[0]:
-            return result[0]
+        if result:
+            name = result[0] or result[1] or result[2] or result[3] or sender_jid
+            return name
         else:
             return sender_jid
-        
     except sqlite3.Error as e:
         print(f"Database error while getting sender name: {e}")
         return sender_jid
@@ -433,21 +416,16 @@ def search_contacts(query: str) -> List[Contact]:
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
-    """Get all chats involving the contact.
-    
-    Args:
-        jid: The contact's JID to search for
-        limit: Maximum number of chats to return (default 20)
-        page: Page number for pagination (default 0)
-    """
+    """Get all chats involving the contact, with proper name info from WhatsApp DB."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
+        # Open both DBs
+        conn_msg = sqlite3.connect(MESSAGES_DB_PATH)
+        conn_wa = sqlite3.connect(WHATSAPP_DB_PATH)
+        cursor_msg = conn_msg.cursor()
+        cursor_wa = conn_wa.cursor()
+        cursor_msg.execute("""
             SELECT DISTINCT
                 c.jid,
-                c.name,
                 c.last_message_time,
                 m.content as last_message,
                 m.sender as last_sender,
@@ -458,29 +436,40 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
         """, (jid, jid, limit, page * limit))
-        
-        chats = cursor.fetchall()
-        
+        chats = cursor_msg.fetchall()
         result = []
         for chat_data in chats:
+            chat_jid = chat_data[0]
+            # Fetch name from whatsmeow_contacts
+            cursor_wa.execute('''
+                SELECT full_name, first_name, push_name, business_name
+                FROM whatsmeow_contacts
+                WHERE their_jid = ?
+                LIMIT 1
+            ''', (chat_jid,))
+            name_row = cursor_wa.fetchone()
+            if name_row:
+                name = name_row[0] or name_row[1] or name_row[2] or name_row[3] or chat_jid
+            else:
+                name = chat_jid
             chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5]
+                jid=chat_jid,
+                name=name,
+                last_message_time=datetime.fromisoformat(chat_data[1]) if chat_data[1] else None,
+                last_message=chat_data[2],
+                last_sender=chat_data[3],
+                last_is_from_me=chat_data[4]
             )
             result.append(chat)
-            
         return result
-        
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return []
     finally:
-        if 'conn' in locals():
-            conn.close()
+        if 'conn_msg' in locals():
+            conn_msg.close()
+        if 'conn_wa' in locals():
+            conn_wa.close()
 
 
 def get_last_interaction(jid: str) -> str:
@@ -765,3 +754,33 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+def list_contacts() -> List[Contact]:
+    """Return all contacts from whatsmeow_contacts (excluding groups)."""
+    try:
+        conn = sqlite3.connect(WHATSAPP_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT their_jid, full_name, first_name, push_name, business_name
+            FROM whatsmeow_contacts
+        """)
+        contacts = cursor.fetchall()
+        result = []
+        for contact_data in contacts:
+            jid = contact_data[0]
+            # Prefer full_name, then first_name, then push_name, then business_name, then jid
+            name = contact_data[1] or contact_data[2] or contact_data[3] or contact_data[4] or jid
+            phone_number = jid.split('@')[0] if jid else None
+            contact = Contact(
+                phone_number=phone_number,
+                name=name,
+                jid=jid
+            )
+            result.append(contact)
+        return result
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
