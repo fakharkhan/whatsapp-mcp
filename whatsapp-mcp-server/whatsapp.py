@@ -756,7 +756,7 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
         return None
 
 def list_contacts() -> List[Contact]:
-    """Return all contacts from whatsmeow_contacts (excluding groups)."""
+    """Return all contacts from whatsmeow_contacts, including those without phone numbers."""
     try:
         conn = sqlite3.connect(WHATSAPP_DB_PATH)
         cursor = conn.cursor()
@@ -768,9 +768,8 @@ def list_contacts() -> List[Contact]:
         result = []
         for contact_data in contacts:
             jid = contact_data[0]
-            # Prefer full_name, then first_name, then push_name, then business_name, then jid
             name = contact_data[1] or contact_data[2] or contact_data[3] or contact_data[4] or jid
-            phone_number = jid.split('@')[0] if jid else None
+            phone_number = jid.split('@')[0] if jid and '@' in jid else None
             contact = Contact(
                 phone_number=phone_number,
                 name=name,
@@ -784,3 +783,45 @@ def list_contacts() -> List[Contact]:
     finally:
         if 'conn' in locals():
             conn.close()
+
+def send_eid_mubarak():
+    """Send a personalized Eid Mubarak message to every unique contact (no duplicates)."""
+    message_template = (
+        "Eid Mubarak, {name}! 🌙✨ May this blessed day bring you and your family endless joy, peace, and prosperity. "
+        "Wishing you beautiful moments filled with love, laughter, and togetherness. May Allah's blessings be with you today and always. "
+        "Have a wonderful celebration! 🕌💫\nBest wishes, SOFT PYRAMID"
+    )
+    contacts = list_contacts()
+    total_contacts = len(contacts)
+    sent_jids = set()
+    skipped = 0
+    sent = 0
+    failed = 0
+    for contact in contacts:
+        # Avoid duplicates by JID
+        if contact.jid in sent_jids:
+            skipped += 1
+            continue
+        sent_jids.add(contact.jid)
+        name = contact.name or contact.phone_number or contact.jid
+        personalized_message = message_template.format(name=name)
+        print(f"Sending to {name} ({contact.jid})...")
+        success, status = send_message(contact.jid, personalized_message)
+        if success:
+            print(f"Success: {status}")
+            sent += 1
+        else:
+            print(f"Failed: {status}")
+            failed += 1
+    print("\n--- Eid Mubarak Broadcast Stats ---")
+    print(f"Total contacts found: {total_contacts}")
+    print(f"Skipped (duplicates): {skipped}")
+    print(f"Sent successfully: {sent}")
+    print(f"Failed to send: {failed}")
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "send_eid_mubarak":
+        send_eid_mubarak()
+    else:
+        print("Usage: python whatsapp.py send_eid_mubarak")
